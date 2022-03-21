@@ -1,5 +1,5 @@
 #  Pyrogram - Telegram MTProto API Client Library for Python
-#  Copyright (C) 2017-2021 Dan <https://github.com/delivrance>
+#  Copyright (C) 2017-present Dan <https://github.com/delivrance>
 #
 #  This file is part of Pyrogram.
 #
@@ -47,6 +47,7 @@ class SendVideo(Scaffold):
         disable_notification: bool = None,
         reply_to_message_id: int = None,
         schedule_date: int = None,
+        protect_content: bool = None,
         reply_markup: Union[
             "types.InlineKeyboardMarkup",
             "types.ReplyKeyboardMarkup",
@@ -122,6 +123,9 @@ class SendVideo(Scaffold):
             schedule_date (``int``, *optional*):
                 Date when the message will be automatically sent. Unix time.
 
+            protect_content (``bool``, *optional*):
+                Protects the contents of the sent message from forwarding and saving.
+
             reply_markup (:obj:`~pyrogram.types.InlineKeyboardMarkup` | :obj:`~pyrogram.types.ReplyKeyboardMarkup` | :obj:`~pyrogram.types.ReplyKeyboardRemove` | :obj:`~pyrogram.types.ForceReply`, *optional*):
                 Additional interface options. An object for an inline keyboard, custom reply keyboard,
                 instructions to remove reply keyboard or to force a reply from the user.
@@ -159,7 +163,7 @@ class SendVideo(Scaffold):
                 app.send_video("me", "video.mp4")
 
                 # Add caption to the video
-                app.send_video("me", "video.mp4", caption="recording")
+                app.send_video("me", "video.mp4", caption="video caption")
 
                 # Send self-destructing video
                 app.send_video("me", "video.mp4", ttl_seconds=10)
@@ -203,7 +207,7 @@ class SendVideo(Scaffold):
                 thumb = await self.save_file(thumb)
                 file = await self.save_file(video, progress=progress, progress_args=progress_args)
                 media = raw.types.InputMediaUploadedDocument(
-                    mime_type=self.guess_mime_type(video.name) or "video/mp4",
+                    mime_type=self.guess_mime_type(file_name or video.name) or "video/mp4",
                     file=file,
                     ttl_seconds=ttl_seconds,
                     thumb=thumb,
@@ -214,7 +218,7 @@ class SendVideo(Scaffold):
                             w=width,
                             h=height
                         ),
-                        raw.types.DocumentAttributeFilename(file_name=video.name)
+                        raw.types.DocumentAttributeFilename(file_name=file_name or video.name)
                     ]
                 )
 
@@ -228,6 +232,7 @@ class SendVideo(Scaffold):
                             reply_to_msg_id=reply_to_message_id,
                             random_id=self.rnd_id(),
                             schedule_date=schedule_date,
+                            noforwards=protect_content,
                             reply_markup=await reply_markup.write(self) if reply_markup else None,
                             **await utils.parse_text_entities(self, caption, parse_mode, caption_entities)
                         )

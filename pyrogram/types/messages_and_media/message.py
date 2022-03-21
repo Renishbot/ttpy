@@ -1,5 +1,5 @@
 #  Pyrogram - Telegram MTProto API Client Library for Python
-#  Copyright (C) 2017-2021 Dan <https://github.com/delivrance>
+#  Copyright (C) 2017-present Dan <https://github.com/delivrance>
 #
 #  This file is part of Pyrogram.
 #
@@ -24,7 +24,7 @@ import pyrogram
 from pyrogram import raw
 from pyrogram import types
 from pyrogram import utils
-from pyrogram.errors import MessageIdsEmpty
+from pyrogram.errors import MessageIdsEmpty, PeerIdInvalid
 from pyrogram.parser import utils as parser_utils, Parser
 from ..object import Object
 from ..update import Update
@@ -95,6 +95,12 @@ class Message(Object, Update):
         forward_date (``int``, *optional*):
             For forwarded messages, date the original message was sent in Unix time.
 
+        reply_to_message_id (``int``, *optional*):
+            The id of the message which this message directly replied to.
+
+        reply_to_top_message_id (``int``, *optional*):
+            The id of the first message which started this message thread.
+
         reply_to_message (:obj:`~pyrogram.types.Message`, *optional*):
             For replies, the original message. Note that the Message object in this field will not contain
             further reply_to_message fields even if it itself is a reply.
@@ -127,6 +133,9 @@ class Message(Object, Update):
         author_signature (``str``, *optional*):
             Signature of the post author for messages in channels, or the custom title of an anonymous group
             administrator.
+
+        has_protected_content (``str``, *optional*):
+            True, if the message can't be forwarded.
 
         text (``str``, *optional*):
             For text messages, the actual UTF-8 text of the message, 0-4096 characters.
@@ -281,6 +290,9 @@ class Message(Object, Update):
             Additional interface options. An object for an inline keyboard, custom reply keyboard,
             instructions to remove reply keyboard or to force a reply from the user.
 
+        reactions (List of :obj:`~pyrogram.types.Reaction`):
+            List of the reactions to this message.
+
         link (``str``, *property*):
             Generate a link to this message, only for groups and channels.
     """
@@ -302,6 +314,8 @@ class Message(Object, Update):
         forward_from_message_id: int = None,
         forward_signature: str = None,
         forward_date: int = None,
+        reply_to_message_id: int = None,
+        reply_to_top_message_id: int = None,
         reply_to_message: "Message" = None,
         mentioned: bool = None,
         empty: bool = None,
@@ -312,6 +326,7 @@ class Message(Object, Update):
         edit_date: int = None,
         media_group_id: str = None,
         author_signature: str = None,
+        has_protected_content: bool = None,
         text: Str = None,
         entities: List["types.MessageEntity"] = None,
         caption_entities: List["types.MessageEntity"] = None,
@@ -357,7 +372,8 @@ class Message(Object, Update):
             "types.ReplyKeyboardMarkup",
             "types.ReplyKeyboardRemove",
             "types.ForceReply"
-        ] = None
+        ] = None,
+        reactions: List["types.Reaction"] = None
     ):
         super().__init__(client)
 
@@ -372,6 +388,8 @@ class Message(Object, Update):
         self.forward_from_message_id = forward_from_message_id
         self.forward_signature = forward_signature
         self.forward_date = forward_date
+        self.reply_to_message_id = reply_to_message_id
+        self.reply_to_top_message_id = reply_to_top_message_id
         self.reply_to_message = reply_to_message
         self.mentioned = mentioned
         self.empty = empty
@@ -382,6 +400,7 @@ class Message(Object, Update):
         self.edit_date = edit_date
         self.media_group_id = media_group_id
         self.author_signature = author_signature
+        self.has_protected_content = has_protected_content
         self.text = text
         self.entities = entities
         self.caption_entities = caption_entities
@@ -423,6 +442,7 @@ class Message(Object, Update):
         self.voice_chat_started = voice_chat_started
         self.voice_chat_ended = voice_chat_ended
         self.voice_chat_members_invited = voice_chat_members_invited
+        self.reactions = reactions
 
     @staticmethod
     async def _parse(
@@ -435,6 +455,26 @@ class Message(Object, Update):
     ):
         if isinstance(message, raw.types.MessageEmpty):
             return Message(message_id=message.id, empty=True, client=client)
+
+        from_id = utils.get_raw_peer_id(message.from_id)
+        peer_id = utils.get_raw_peer_id(message.peer_id)
+        user_id = from_id or peer_id
+
+        if isinstance(message.from_id, raw.types.PeerUser) and isinstance(message.peer_id, raw.types.PeerUser):
+            if from_id not in users or peer_id not in users:
+                try:
+                    r = await client.send(
+                        raw.functions.users.GetUsers(
+                            id=[
+                                await client.resolve_peer(from_id),
+                                await client.resolve_peer(peer_id)
+                            ]
+                        )
+                    )
+                except PeerIdInvalid:
+                    pass
+                else:
+                    users.update({i.id: i for i in r})
 
         if isinstance(message, raw.types.MessageService):
             action = message.action
@@ -499,14 +539,13 @@ class Message(Object, Update):
                 voice_chat_members_invited = types.VoiceChatMembersInvited._parse(client, action, users)
                 service_type = "voice_chat_members_invited"
 
-            user = utils.get_raw_peer_id(message.from_id) or utils.get_raw_peer_id(message.peer_id)
-            from_user = types.User._parse(client, users.get(user, None))
-            sender_chat = types.Chat._parse(client, message, users, chats) if not from_user else None
+            from_user = types.User._parse(client, users.get(user_id, None))
+            sender_chat = types.Chat._parse(client, message, users, chats, is_chat=False) if not from_user else None
 
             parsed_message = Message(
                 message_id=message.id,
                 date=message.date,
-                chat=types.Chat._parse(client, message, users, chats),
+                chat=types.Chat._parse(client, message, users, chats, is_chat=True),
                 from_user=from_user,
                 sender_chat=sender_chat,
                 service=service_type,
@@ -553,8 +592,6 @@ class Message(Object, Update):
                         parsed_message.service = "game_high_score"
                     except MessageIdsEmpty:
                         pass
-
-
 
             return parsed_message
 
@@ -647,6 +684,14 @@ class Message(Object, Update):
                             video_attributes = attributes.get(raw.types.DocumentAttributeVideo, None)
                             animation = types.Animation._parse(client, doc, video_attributes, file_name)
                             media_type = "animation"
+                        elif raw.types.DocumentAttributeSticker in attributes:
+                            sticker = await types.Sticker._parse(
+                                client, doc,
+                                attributes.get(raw.types.DocumentAttributeImageSize, None),
+                                attributes[raw.types.DocumentAttributeSticker],
+                                file_name
+                            )
+                            media_type = "sticker"
                         elif raw.types.DocumentAttributeVideo in attributes:
                             video_attributes = attributes[raw.types.DocumentAttributeVideo]
 
@@ -656,14 +701,6 @@ class Message(Object, Update):
                             else:
                                 video = types.Video._parse(client, doc, video_attributes, file_name, media.ttl_seconds)
                                 media_type = "video"
-                        elif raw.types.DocumentAttributeSticker in attributes:
-                            sticker = await types.Sticker._parse(
-                                client, doc,
-                                attributes.get(raw.types.DocumentAttributeImageSize, None),
-                                attributes[raw.types.DocumentAttributeSticker],
-                                file_name
-                            )
-                            media_type = "sticker"
                         else:
                             document = types.Document._parse(client, doc, file_name)
                             media_type = "document"
@@ -696,14 +733,16 @@ class Message(Object, Update):
                 else:
                     reply_markup = None
 
-            user = utils.get_raw_peer_id(message.from_id) or utils.get_raw_peer_id(message.peer_id)
-            from_user = types.User._parse(client, users.get(user, None))
-            sender_chat = types.Chat._parse(client, message, users, chats) if not from_user else None
+            from_user = types.User._parse(client, users.get(user_id, None))
+            sender_chat = types.Chat._parse(client, message, users, chats, is_chat=False) if not from_user else None
+
+            reactions = [types.Reaction(emoji=r.reaction, count=r.count, chosen=r.chosen)
+                         for r in message.reactions.results] if message.reactions else None
 
             parsed_message = Message(
                 message_id=message.id,
                 date=message.date,
-                chat=types.Chat._parse(client, message, users, chats),
+                chat=types.Chat._parse(client, message, users, chats, is_chat=True),
                 from_user=from_user,
                 sender_chat=sender_chat,
                 text=(
@@ -727,6 +766,7 @@ class Message(Object, Update):
                     else None
                 ),
                 author_signature=message.post_author,
+                has_protected_content=message.noforwards,
                 forward_from=forward_from,
                 forward_sender_name=forward_sender_name,
                 forward_from_chat=forward_from_chat,
@@ -758,18 +798,23 @@ class Message(Object, Update):
                 via_bot=types.User._parse(client, users.get(message.via_bot_id, None)),
                 outgoing=message.out,
                 reply_markup=reply_markup,
+                reactions=reactions,
                 client=client
             )
 
-            if message.reply_to and replies:
-                try:
-                    parsed_message.reply_to_message = await client.get_messages(
-                        parsed_message.chat.id,
-                        reply_to_message_ids=message.id,
-                        replies=replies - 1
-                    )
-                except MessageIdsEmpty:
-                    pass
+            if message.reply_to:
+                if replies:
+                    try:
+                        parsed_message.reply_to_message = await client.get_messages(
+                            parsed_message.chat.id,
+                            reply_to_message_ids=message.id,
+                            replies=replies - 1
+                        )
+                    except MessageIdsEmpty:
+                        pass
+
+                parsed_message.reply_to_message_id = message.reply_to.reply_to_msg_id
+                parsed_message.reply_to_top_message_id = message.reply_to.reply_to_top_id
 
             return parsed_message
 
@@ -818,7 +863,9 @@ class Message(Object, Update):
         disable_web_page_preview: bool = None,
         disable_notification: bool = None,
         reply_to_message_id: int = None,
-        reply_markup=None
+        schedule_date: int = None,
+        protect_content: bool = None,
+        reply_markup = None
     ) -> "Message":
         """Bound method *reply_text* of :obj:`~pyrogram.types.Message`.
 
@@ -868,6 +915,12 @@ class Message(Object, Update):
             reply_to_message_id (``int``, *optional*):
                 If the message is a reply, ID of the original message.
 
+            schedule_date (``int``, *optional*):
+                Date when the message will be automatically sent. Unix time.
+
+            protect_content (``bool``, *optional*):
+                Protects the contents of the sent message from forwarding and saving.
+
             reply_markup (:obj:`~pyrogram.types.InlineKeyboardMarkup` | :obj:`~pyrogram.types.ReplyKeyboardMarkup` | :obj:`~pyrogram.types.ReplyKeyboardRemove` | :obj:`~pyrogram.types.ForceReply`, *optional*):
                 Additional interface options. An object for an inline keyboard, custom reply keyboard,
                 instructions to remove reply keyboard or to force a reply from the user.
@@ -892,6 +945,8 @@ class Message(Object, Update):
             disable_web_page_preview=disable_web_page_preview,
             disable_notification=disable_notification,
             reply_to_message_id=reply_to_message_id,
+            schedule_date=schedule_date,
+            protect_content=protect_content,
             reply_markup=reply_markup
         )
 
@@ -1339,7 +1394,7 @@ class Message(Object, Update):
         Example:
             .. code-block:: python
 
-                message.reply_contact(phone_number, "Dan")
+                message.reply_contact("+1-123-456-7890", "Name")
 
         Parameters:
             phone_number (``str``):
@@ -1859,7 +1914,7 @@ class Message(Object, Update):
                 If *reply_to_message_id* is passed, this parameter will be ignored.
                 Defaults to ``True`` in group chats and ``False`` in private chats.
 
-            caption (``bool``, *optional*):
+            caption (``str``, *optional*):
                 Photo caption, 0-1024 characters.
 
             parse_mode (``str``, *optional*):
@@ -2893,6 +2948,7 @@ class Message(Object, Update):
         disable_notification: bool = None,
         reply_to_message_id: int = None,
         schedule_date: int = None,
+        protect_content: bool = None,
         reply_markup: Union[
             "types.InlineKeyboardMarkup",
             "types.ReplyKeyboardMarkup",
@@ -2909,7 +2965,7 @@ class Message(Object, Update):
             client.copy_message(
                 chat_id=chat_id,
                 from_chat_id=message.chat.id,
-                message_ids=message.message_id
+                message_id=message.message_id
             )
 
         Example:
@@ -2948,6 +3004,9 @@ class Message(Object, Update):
             schedule_date (``int``, *optional*):
                 Date when the message will be automatically sent. Unix time.
 
+            protect_content (``bool``, *optional*):
+                Protects the contents of the sent message from forwarding and saving.
+
             reply_markup (:obj:`~pyrogram.types.InlineKeyboardMarkup` | :obj:`~pyrogram.types.ReplyKeyboardMarkup` | :obj:`~pyrogram.types.ReplyKeyboardRemove` | :obj:`~pyrogram.types.ForceReply`, *optional*):
                 Additional interface options. An object for an inline keyboard, custom reply keyboard,
                 instructions to remove reply keyboard or to force a reply from the user.
@@ -2977,6 +3036,7 @@ class Message(Object, Update):
                 disable_notification=disable_notification,
                 reply_to_message_id=reply_to_message_id,
                 schedule_date=schedule_date,
+                protect_content=protect_content,
                 reply_markup=self.reply_markup if reply_markup is object else reply_markup
             )
         elif self.media:
@@ -2986,6 +3046,7 @@ class Message(Object, Update):
                 disable_notification=disable_notification,
                 reply_to_message_id=reply_to_message_id,
                 schedule_date=schedule_date,
+                protect_content=protect_content,
                 reply_markup=self.reply_markup if reply_markup is object else reply_markup
             )
 
@@ -3362,7 +3423,7 @@ class Message(Object, Update):
             options=option
         )
 
-    async def pin(self, disable_notification: bool = False, both_sides: bool = False) -> bool:
+    async def pin(self, disable_notification: bool = False, both_sides: bool = False) -> "types.Message":
         """Bound method *pin* of :obj:`~pyrogram.types.Message`.
 
         Use as a shortcut for:
@@ -3389,7 +3450,7 @@ class Message(Object, Update):
                 Applicable to private chats only. Defaults to False.
 
         Returns:
-            True on success.
+            :obj:`~pyrogram.types.Message`: On success, the service message is returned.
 
         Raises:
             RPCError: In case of a Telegram RPC error.
